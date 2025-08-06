@@ -4,197 +4,532 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>RSI Pump/Dump Signal – Binance USDT Futures</title>
+  <!-- Tailwind CSS CDN for modern styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
+    /* Custom styles for Inter font and general body layout */
     body {
-      font-family: Arial, sans-serif;
-      background: #111;
-      color: #0f0;
-      text-align: center;
-      padding: 20px;
+      font-family: 'Inter', sans-serif;
+      /* Dark theme styling using Tailwind classes */
+      @apply bg-gray-900 text-green-400 flex flex-col items-center justify-start min-h-screen p-4;
     }
     h1, h2, select {
-      color: #fff;
+      @apply text-white; /* White text for headings and select dropdown */
     }
     #signal {
-      font-size: 2em;
-      margin-top: 20px;
+      @apply text-4xl font-extrabold mt-5; /* Large, bold text for the main signal */
     }
-    #debug {
-      margin-top: 10px;
-      color: #ccc;
+    #currentSymbolInfo {
+      @apply text-gray-400 mt-2 text-lg; /* Slightly smaller, gray text for debug info */
+    }
+    table {
+      @apply w-full max-w-4xl border-collapse mt-8 shadow-lg rounded-lg overflow-hidden; /* Styling for the main table */
+    }
+    th, td {
+      @apply border border-gray-700 px-4 py-2 text-left; /* Borders and padding for table cells */
+    }
+    th {
+      /* Styling for table headers, making them clickable */
+      @apply bg-gray-800 text-white cursor-pointer hover:bg-gray-700 transition duration-200;
+    }
+    tbody tr:nth-child(even) {
+      @apply bg-gray-800; /* Alternate row background for readability */
+    }
+    tbody tr:nth-child(odd) {
+      @apply bg-gray-700; /* Alternate row background for readability */
+    }
+    tbody tr:hover {
+      @apply bg-gray-600; /* Hover effect for table rows */
+    }
+    /* Specific text colors for different signal types */
+    .pump-signal {
+      @apply text-green-500 font-bold;
+    }
+    .dump-signal {
+      @apply text-red-500 font-bold;
+    }
+    .neutral-signal {
+      @apply text-white;
+    }
+    .no-data-signal, .error-signal {
+      @apply text-gray-500;
     }
   </style>
 </head>
 <body>
+  <h1 class="text-4xl font-bold mb-4">Binance RSI Pump/Dump Signal</h1>
+  <h2 class="text-2xl mb-6">15m Timeframe – Select USDT Perpetual Pair</h2>
 
-<h1>Binance RSI Pump/Dump Signal</h1>
-<h2>15m Timeframe – Select USDT Perpetual Pair</h2>
+  <!-- Dropdown for selecting a single symbol for live updates -->
+  <div class="mb-8 w-full max-w-md">
+    <select id="symbolSelect" class="w-full p-3 rounded-md bg-gray-800 text-white border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option disabled selected>Loading symbols...</option>
+    </select>
+  </div>
 
-<select id="symbolSelect">
-  <option disabled selected>Loading symbols...</option>
-</select>
+  <!-- Live signal display for the selected symbol -->
+  <div id="signal" class="text-green-400">Waiting for selection...</div>
+  <div id="currentSymbolInfo" class="text-gray-400"></div>
 
-<div id="signal">Waiting for selection...</div>
-<div id="debug"></div>
+  <h2 class="text-2xl mt-10 mb-4 text-white">All USDT Perpetual Pairs (Snapshot)</h2>
+  <!-- Table to display initial data for all symbols, with sortable headers -->
+  <table id="allSymbolsTable">
+    <thead>
+      <tr>
+        <th data-sort="symbol">Symbol</th>
+        <th data-sort="rsiStart">RSI Start</th>
+        <th data-sort="rsiEnd">RSI End</th>
+        <th data-sort="rsiDiff">RSI Diff</th>
+        <th data-sort="signal">Signal</th>
+      </tr>
+    </thead>
+    <tbody id="allSymbolsTableBody">
+      <!-- Rows will be dynamically inserted here by JavaScript -->
+    </tbody>
+  </table>
 
-<script>
-  const interval = '15m';
-  const limit = 100;
-  const rsiPeriod = 14;
-  let closes = [];
-  let ws;
+  <script>
+    // Configuration constants for Binance API and RSI calculation
+    const interval = '15m'; // Timeframe for klines
+    const limit = 100; // Number of historical klines to fetch for RSI calculation
+    const rsiPeriod = 14; // Period for RSI calculation
 
-  const getRecentRSIDiff = (rsi, lookback = 14) => {
-    if (rsi.length < lookback) return null;
-    const recentRSI = rsi.slice(-lookback);
-    let recentHigh = -Infinity;
-    let recentLow = Infinity;
+    let closes = []; // Stores close prices for the currently selected symbol (for live updates)
+    let ws; // WebSocket object for the currently selected symbol
+    let allSymbolsInitialData = []; // Stores initial snapshot data for all symbols in the table
+    let currentSortColumn = 'symbol'; // Default sorting column
+    let currentSortDirection = 'asc'; // Default sorting direction
 
-    for (const value of recentRSI) {
-      if (!isNaN(value)) {
-        if (value > recentHigh) recentHigh = value;
-        if (value < recentLow) recentLow = value;
+    // --- RSI Calculation and Signal Functions ---
+
+    /**
+     * Calculates the recent RSI difference, including pump/dump strength and direction.
+     * This function helps quantify the recent movement of the RSI.
+     * @param {number[]} rsi - Array of RSI values.
+     * @param {number} lookback - Number of recent RSI values to consider for pump/dump analysis.
+     * @returns {object|null} An object containing recentHigh, recentLow, pumpStrength, dumpStrength, direction, strength, or null if not enough data.
+     */
+    const getRecentRSIDiff = (rsi, lookback = 14) => {
+      if (rsi.length < lookback) return null;
+
+      const recentRSI = rsi.slice(-lookback); // Get the most recent RSI values
+      let recentHigh = -Infinity;
+      let recentLow = Infinity;
+
+      // Find the highest and lowest RSI values within the lookback period
+      for (const value of recentRSI) {
+        if (!isNaN(value)) { // Ensure the value is a number
+          if (value > recentHigh) recentHigh = value;
+          if (value < recentLow) recentLow = value;
+        }
       }
-    }
 
-    const pumpStrength = recentHigh - recentLow;
-    const dumpStrength = Math.abs(recentLow - recentHigh);
-    const startRSI = recentRSI[0];
-    const endRSI = recentRSI[recentRSI.length - 1];
-    const direction = endRSI > startRSI ? 'pump' : endRSI < startRSI ? 'dump' : 'neutral';
-    const strength = Math.abs(endRSI - startRSI);
+      const pumpStrength = recentHigh - recentLow; // Difference between recent high and low
+      const dumpStrength = Math.abs(recentLow - recentHigh); // Absolute difference (same as pumpStrength)
 
-    return { recentHigh, recentLow, pumpStrength, dumpStrength, direction, strength };
-  };
+      const startRSI = recentRSI[0]; // RSI value at the start of the lookback period
+      const endRSI = recentRSI[recentRSI.length - 1]; // Current (most recent) RSI value
+      // Determine the direction of movement (pump, dump, or neutral)
+      const direction = endRSI > startRSI ? 'pump' : endRSI < startRSI ? 'dump' : 'neutral';
+      const strength = Math.abs(endRSI - startRSI); // Absolute change from start to end
 
-  const getSignal = (s) => {
-    const pumpDump = s.rsi14 ? getRecentRSIDiff(s.rsi14, 14) : null;
-    if (!pumpDump) return 'NO DATA';
+      return {
+        recentHigh,
+        recentLow,
+        pumpStrength,
+        dumpStrength,
+        direction,
+        strength
+      };
+    };
 
-    const direction = pumpDump.direction;
-    const strength = pumpDump.strength;
-    const pump = pumpDump.pumpStrength;
-    const dump = pumpDump.dumpStrength;
+    /**
+     * Determines a trading signal based on the calculated RSI pump/dump characteristics.
+     * This function categorizes the RSI movement into different "zones" (MAX, BALANCE, LOWEST).
+     * @param {object} s - An object containing rsi14 (array of RSI values).
+     * @returns {string} The determined signal (e.g., 'MAX ZONE PUMP', 'NO STRONG SIGNAL').
+     */
+    const getSignal = (s) => {
+      // Get pump/dump data from the RSI values
+      const pumpDump = s.rsi14 ? getRecentRSIDiff(s.rsi14, 14) : null;
+      if (!pumpDump) return 'NO DATA'; // Return 'NO DATA' if pumpDump is null
 
-    const inRange = (val, min, max) => val !== undefined && val >= min && val <= max;
-    const isAbove30 = (val) => val !== undefined && val >= 30;
+      const direction = pumpDump.direction;
+      const pump = pumpDump.pumpStrength;
+      const dump = pumpDump.dumpStrength;
 
-    const pumpAbove30 = isAbove30(pump);
-    const dumpAbove30 = isAbove30(dump);
+      // Helper functions to check if a value is within a range or above a threshold
+      const inRange = (val, min, max) => val !== undefined && val >= min && val <= max;
+      const isAbove30 = (val) => val !== undefined && val >= 30;
 
-    const pumpInRange_21_26 = inRange(pump, 21, 26);
-    const dumpInRange_21_26 = inRange(dump, 21, 26);
+      const pumpAbove30 = isAbove30(pump);
+      const dumpAbove30 = isAbove30(dump);
 
-    const pumpInRange_1_10 = inRange(pump, 1, 10);
-    const dumpInRange_1_10 = inRange(dump, 1, 10);
+      const pumpInRange_21_26 = inRange(pump, 21, 26);
+      const dumpInRange_21_26 = inRange(dump, 21, 26);
 
-    if (direction === 'pump' && pumpAbove30) return 'MAX ZONE PUMP';
-    if (direction === 'dump' && dumpAbove30) return 'MAX ZONE DUMP';
-    if (pumpInRange_21_26 && direction === 'pump') return 'BALANCE ZONE PUMP';
-    if (dumpInRange_21_26 && direction === 'dump') return 'BALANCE ZONE DUMP';
-    if (pumpInRange_1_10 && direction === 'pump') return 'LOWEST ZONE PUMP';
-    if (dumpInRange_1_10 && direction === 'dump') return 'LOWEST ZONE DUMP';
+      const pumpInRange_1_10 = inRange(pump, 1, 10);
+      const dumpInRange_1_10 = inRange(dump, 1, 10);
 
-    return 'NO STRONG SIGNAL';
-  };
+      // Apply signal logic based on direction and strength zones
+      if (direction === 'pump' && pumpAbove30) return 'MAX ZONE PUMP';
+      if (direction === 'dump' && dumpAbove30) return 'MAX ZONE DUMP';
+      if (pumpInRange_21_26 && direction === 'pump') return 'BALANCE ZONE PUMP';
+      if (dumpInRange_21_26 && direction === 'dump') return 'BALANCE ZONE DUMP';
+      if (pumpInRange_1_10 && direction === 'pump') return 'LOWEST ZONE PUMP';
+      if (dumpInRange_1_10 && direction === 'dump') return 'LOWEST ZONE DUMP';
 
-  const computeRSI = (data, period = 14) => {
-    const rsi = [];
-    let gains = 0;
-    let losses = 0;
+      return 'NO STRONG SIGNAL'; // Default signal if no specific conditions are met
+    };
 
-    for (let i = 1; i < period + 1; i++) {
-      const change = data[i] - data[i - 1];
-      if (change > 0) gains += change;
-      else losses -= change;
-    }
+    /**
+     * Computes the Relative Strength Index (RSI) for a given data set of closing prices.
+     * @param {number[]} data - Array of closing prices.
+     * @param {number} period - The period for RSI calculation (e.g., 14 for 14-period RSI).
+     * @returns {number[]} An array of RSI values, filtering out initial NaN values.
+     */
+    const computeRSI = (data, period = 14) => {
+      const rsi = [];
+      let gains = 0;
+      let losses = 0;
 
-    let avgGain = gains / period;
-    let avgLoss = losses / period;
-    rsi[period] = 100 - (100 / (1 + avgGain / avgLoss));
+      // Initial calculation for the first 'period' values to establish initial average gain/loss
+      for (let i = 1; i < period + 1; i++) {
+        const change = data[i] - data[i - 1];
+        if (change > 0) gains += change;
+        else losses -= change;
+      }
 
-    for (let i = period + 1; i < data.length; i++) {
-      const change = data[i] - data[i - 1];
-      const gain = Math.max(change, 0);
-      const loss = Math.max(-change, 0);
-      avgGain = (avgGain * (period - 1) + gain) / period;
-      avgLoss = (avgLoss * (period - 1) + loss) / period;
-      rsi[i] = 100 - (100 / (1 + avgGain / avgLoss));
-    }
+      let avgGain = gains / period;
+      let avgLoss = losses / period;
+      // Handle division by zero for avgLoss to prevent Infinity/NaN RSI
+      rsi[period] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
 
-    return rsi;
-  };
+      // Subsequent calculations using smoothing formula
+      for (let i = period + 1; i < data.length; i++) {
+        const change = data[i] - data[i - 1];
+        const gain = Math.max(change, 0); // Only positive changes contribute to gain
+        const loss = Math.max(-change, 0); // Only negative changes (absolute) contribute to loss
 
-  const updateSignalDisplay = (signal, rsi14) => {
-    const el = document.getElementById('signal');
-    el.textContent = signal;
-    el.style.color = signal.includes('PUMP') ? '#0f0' :
-                     signal.includes('DUMP') ? '#f00' :
-                     '#fff';
+        // Smoothed average gain/loss
+        avgGain = (avgGain * (period - 1) + gain) / period;
+        avgLoss = (avgLoss * (period - 1) + loss) / period;
 
-    const debugEl = document.getElementById('debug');
-    debugEl.innerText = `RSI Start: ${rsi14[0]?.toFixed(2)}, End: ${rsi14.at(-1)?.toFixed(2)}, Diff: ${(rsi14.at(-1) - rsi14[0]).toFixed(2)}`;
-  };
+        // Calculate RSI for the current period
+        rsi[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+      }
 
-  const runSignal = () => {
-    const rsi = computeRSI(closes, rsiPeriod);
-    const rsi14 = rsi.slice(-30);
-    const signal = getSignal({ rsi14 });
-    updateSignalDisplay(signal, rsi14);
-  };
+      // Filter out initial undefined/NaN values that occur before enough data points are collected
+      return rsi.filter(val => !isNaN(val));
+    };
 
-  const connectWebSocket = (symbol) => {
-    if (ws) ws.close();
-    ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${interval}`);
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      const k = msg.k;
-      if (k.x) {
-        const close = parseFloat(k.c);
-        closes.push(close);
-        if (closes.length > limit) closes.shift();
-        runSignal();
+    // --- Live Signal Display for Selected Symbol ---
+
+    /**
+     * Updates the main signal display and current symbol info for the selected symbol.
+     * This function is called frequently by the WebSocket to show real-time updates.
+     * @param {string} signal - The calculated signal string.
+     * @param {number[]} rsiValues - The recent RSI values used for the signal.
+     */
+    const updateLiveSignalDisplay = (signal, rsiValues) => {
+      const signalEl = document.getElementById('signal');
+      const currentSymbolInfoEl = document.getElementById('currentSymbolInfo');
+
+      signalEl.textContent = signal; // Update the signal text
+
+      // Apply appropriate color class based on the signal type
+      let signalColorClass = 'neutral-signal';
+      if (signal.includes('PUMP')) {
+        signalColorClass = 'pump-signal';
+      } else if (signal.includes('DUMP')) {
+        signalColorClass = 'dump-signal';
+      } else if (signal.includes('NO DATA') || signal.includes('ERROR')) {
+        signalColorClass = 'no-data-signal';
+      }
+      // Update the class list, preserving base styling
+      signalEl.className = `text-4xl font-extrabold mt-5 ${signalColorClass}`;
+
+      // Calculate and display RSI start, end, and difference for debugging/info
+      const start = rsiValues.length > 0 ? rsiValues[0] : NaN;
+      const end = rsiValues.length > 0 ? rsiValues[rsiValues.length - 1] : NaN;
+      const diff = !isNaN(start) && !isNaN(end) ? (end - start).toFixed(2) : 'N/A';
+
+      currentSymbolInfoEl.innerText = `RSI Start: ${isNaN(start) ? 'N/A' : start.toFixed(2)}, End: ${isNaN(end) ? 'N/A' : end.toFixed(2)}, Diff: ${diff}`;
+    };
+
+    /**
+     * Runs the signal calculation for the current 'closes' data (of the selected symbol)
+     * and updates the live display.
+     */
+    const runLiveSignal = () => {
+      // Ensure enough data points are available for RSI calculation
+      if (closes.length < rsiPeriod + 1) {
+        updateLiveSignalDisplay('NOT ENOUGH DATA', []);
+        return;
+      }
+      const rsi = computeRSI(closes, rsiPeriod);
+      // Ensure enough RSI values are available for getRecentRSIDiff's lookback (14)
+      const rsiForSignal = rsi.slice(-30); // Use a larger slice to ensure enough data for lookback
+      const signal = getSignal({ rsi14: rsiForSignal });
+      updateLiveSignalDisplay(signal, rsiForSignal);
+    };
+
+    /**
+     * Connects to the Binance WebSocket for the given symbol to receive live kline updates.
+     * Manages closing previous connections and handling errors/reconnections.
+     * @param {string} symbol - The trading pair symbol (e.g., 'BTCUSDT').
+     */
+    const connectWebSocket = (symbol) => {
+      if (ws) {
+        ws.close(); // Close any existing WebSocket connection
+        console.log(`Closed previous WebSocket for ${ws.url}`);
+      }
+      // Construct WebSocket URL for Binance Futures kline stream
+      ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${interval}`);
+      console.log(`Attempting to connect WebSocket for ${symbol}...`);
+
+      ws.onopen = () => {
+        console.log(`WebSocket opened successfully for ${symbol}`);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        const k = msg.k; // kline data
+        if (k.x) { // k.x is true when the candle (bar) is closed
+          const close = parseFloat(k.c); // Get the closing price
+          closes.push(close); // Add to our historical closes array
+          if (closes.length > limit) closes.shift(); // Keep the array size within 'limit'
+          runLiveSignal(); // Recalculate and update the live signal
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error(`WebSocket error for ${symbol}:`, error);
+        updateLiveSignalDisplay('WS ERROR', []); // Display an error message on the UI
+      };
+
+      ws.onclose = (event) => {
+        console.log(`WebSocket closed for ${symbol}:`, event.code, event.reason);
+        // Attempt to reconnect if the close was not clean (e.g., unexpected disconnection)
+        if (!event.wasClean) {
+          console.log('WebSocket not closed cleanly, attempting to reconnect in 3 seconds...');
+          setTimeout(() => connectWebSocket(symbol), 3000); // Reconnect after 3 seconds
+        }
+      };
+    };
+
+    /**
+     * Fetches initial historical klines data for a given symbol.
+     * This is used to populate the 'closes' array before WebSocket updates begin.
+     * @param {string} symbol - The trading pair symbol.
+     */
+    const fetchInitialKlines = async (symbol) => {
+      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        const data = await res.json();
+        closes = data.map(k => parseFloat(k[4])); // Extract closing prices from the klines data
+        runLiveSignal(); // Run signal calculation with this initial historical data
+      } catch (error) {
+        console.error(`Failed to fetch initial klines for ${symbol}:`, error);
+        updateLiveSignalDisplay('FETCH ERROR', []); // Display an error if fetching fails
       }
     };
-  };
 
-  const fetchInitialData = async (symbol) => {
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    closes = data.map(k => parseFloat(k[4]));
-    runSignal();
-    connectWebSocket(symbol);
-  };
+    // --- All Symbols Table and Sorting Logic ---
 
-  const loadSymbols = async () => {
-    const url = `https://fapi.binance.com/fapi/v1/exchangeInfo`;
-    const res = await fetch(url);
-    const data = await res.json();
+    /**
+     * Renders or re-renders the table with all symbols' initial data.
+     * This table shows a snapshot of data at page load, and is sortable.
+     * @param {Array<object>} data - The array of symbol data objects to render.
+     */
+    const renderAllSymbolsTable = (data) => {
+      const tbody = document.getElementById('allSymbolsTableBody');
+      tbody.innerHTML = ''; // Clear existing rows before rendering new ones
 
-    const usdtPairs = data.symbols
-      .filter(s => s.quoteAsset === 'USDT' && s.contractType === 'PERPETUAL' && s.status === 'TRADING')
-      .map(s => s.symbol);
+      data.forEach(item => {
+        const row = document.createElement('tr');
+        // Determine the CSS class for the signal text based on its content
+        const signalClass = item.signal.includes('PUMP') ? 'pump-signal' :
+                           item.signal.includes('DUMP') ? 'dump-signal' :
+                           item.signal.includes('NO DATA') || item.signal.includes('ERROR') ? 'no-data-signal' :
+                           'neutral-signal';
 
-    const select = document.getElementById('symbolSelect');
-    select.innerHTML = `<option disabled selected>Select a symbol</option>`;
-    usdtPairs.forEach(sym => {
-      const opt = document.createElement('option');
-      opt.value = sym;
-      opt.textContent = sym;
-      select.appendChild(opt);
+        // Populate the row with symbol data, formatting numbers to 2 decimal places or N/A
+        row.innerHTML = `
+          <td>${item.symbol}</td>
+          <td>${item.rsiStart !== null ? item.rsiStart.toFixed(2) : 'N/A'}</td>
+          <td>${item.rsiEnd !== null ? item.rsiEnd.toFixed(2) : 'N/A'}</td>
+          <td>${item.rsiDiff !== null ? item.rsiDiff.toFixed(2) : 'N/A'}</td>
+          <td class="${signalClass}">${item.signal}</td>
+        `;
+        tbody.appendChild(row); // Add the new row to the table body
+      });
+    };
+
+    /**
+     * Sorts the `allSymbolsInitialData` array based on the specified column and direction,
+     * then re-renders the table.
+     * @param {string} column - The data key (column name) to sort by (e.g., 'symbol', 'rsiStart').
+     */
+    const sortTable = (column) => {
+      // Toggle sort direction if the same column is clicked again
+      if (currentSortColumn === column) {
+        currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+      } else {
+        currentSortColumn = column;
+        currentSortDirection = 'asc'; // Default to ascending for a new column
+      }
+
+      // Sort the global `allSymbolsInitialData` array
+      allSymbolsInitialData.sort((a, b) => {
+        let valA = a[column];
+        let valB = b[column];
+
+        // Handle numeric conversions for proper sorting of numbers
+        if (column.includes('rsi') || column === 'rsiDiff') {
+          valA = parseFloat(valA);
+          valB = parseFloat(valB);
+          // Handle null/NaN values during numeric comparison
+          if (isNaN(valA) && isNaN(valB)) return 0;
+          if (isNaN(valA)) return currentSortDirection === 'asc' ? 1 : -1;
+          if (isNaN(valB)) return currentSortDirection === 'asc' ? -1 : 1;
+        } else if (typeof valA === 'string') {
+          // Case-insensitive string comparison for symbol and signal
+          valA = valA.toLowerCase();
+          valB = valB.toLowerCase();
+        }
+
+        if (valA < valB) return currentSortDirection === 'asc' ? -1 : 1;
+        if (valA > valB) return currentSortDirection === 'asc' ? 1 : -1;
+        return 0; // Values are equal
+      });
+
+      renderAllSymbolsTable(allSymbolsInitialData); // Re-render the table after sorting
+    };
+
+    // Add event listeners to table headers for sorting functionality
+    document.querySelectorAll('#allSymbolsTable th').forEach(header => {
+      header.addEventListener('click', () => {
+        const column = header.dataset.sort; // Get the column name from data-sort attribute
+        if (column) {
+          sortTable(column);
+        }
+      });
     });
 
-    select.onchange = () => {
-      const selected = select.value;
-      document.getElementById('signal').textContent = 'Loading...';
-      document.getElementById('debug').textContent = '';
-      fetchInitialData(selected);
+    /**
+     * Loads all USDT perpetual symbols from Binance, fetches their initial klines data,
+     * computes RSI and signals, and then populates the sortable table.
+     */
+    const loadSymbolsAndInitialData = async () => {
+      const symbolSelect = document.getElementById('symbolSelect');
+      symbolSelect.innerHTML = `<option disabled selected>Loading symbols...</option>`; // Initial loading state
+
+      const exchangeInfoUrl = `https://fapi.binance.com/fapi/v1/exchangeInfo`;
+      try {
+        const res = await fetch(exchangeInfoUrl);
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        const data = await res.json();
+
+        // Filter for USDT perpetual trading pairs that are currently active
+        const usdtPairs = data.symbols
+          .filter(s => s.quoteAsset === 'USDT' && s.contractType === 'PERPETUAL' && s.status === 'TRADING')
+          .map(s => s.symbol);
+
+        // Populate the symbol selection dropdown
+        symbolSelect.innerHTML = `<option disabled selected>Select a symbol</option>`;
+        usdtPairs.forEach(sym => {
+          const opt = document.createElement('option');
+          opt.value = sym;
+          opt.textContent = sym;
+          symbolSelect.appendChild(opt);
+        });
+
+        // Fetch initial data for all symbols for the table (snapshot)
+        allSymbolsInitialData = []; // Clear previous data
+        for (const sym of usdtPairs) {
+          try {
+            const klinesUrl = `https://fapi.binance.com/fapi/v1/klines?symbol=${sym.toUpperCase()}&interval=${interval}&limit=${limit}`;
+            const klinesRes = await fetch(klinesUrl);
+            if (!klinesRes.ok) {
+              console.warn(`Could not fetch klines for ${sym}: HTTP status ${klinesRes.status}. Skipping.`);
+              // Add a placeholder entry if data can't be fetched
+              allSymbolsInitialData.push({
+                symbol: sym,
+                rsiStart: null,
+                rsiEnd: null,
+                rsiDiff: null,
+                signal: 'FETCH ERROR'
+              });
+              continue; // Skip to the next symbol
+            }
+            const klinesData = await klinesRes.json();
+            const symbolCloses = klinesData.map(k => parseFloat(k[4]));
+
+            // Check if enough data is available for RSI calculation
+            if (symbolCloses.length >= rsiPeriod + 1) {
+              const rsi = computeRSI(symbolCloses, rsiPeriod);
+              const rsiForSignal = rsi.slice(-30); // Ensure enough data for lookback
+              const signal = getSignal({ rsi14: rsiForSignal });
+
+              const rsiStart = rsiForSignal.length > 0 ? rsiForSignal[0] : null;
+              const rsiEnd = rsiForSignal.length > 0 ? rsiForSignal[rsiForSignal.length - 1] : null;
+              const rsiDiff = (rsiEnd !== null && rsiStart !== null) ? (rsiEnd - rsiStart) : null;
+
+              allSymbolsInitialData.push({
+                symbol: sym,
+                rsiStart: rsiStart,
+                rsiEnd: rsiEnd,
+                rsiDiff: rsiDiff,
+                signal: signal
+              });
+            } else {
+              // If not enough data, mark as such
+              allSymbolsInitialData.push({
+                symbol: sym,
+                rsiStart: null,
+                rsiEnd: null,
+                rsiDiff: null,
+                signal: 'NOT ENOUGH DATA'
+              });
+            }
+          } catch (klinesError) {
+            console.error(`Error fetching klines or processing RSI for ${sym}:`, klinesError);
+            // Add an error entry if an exception occurs
+            allSymbolsInitialData.push({
+              symbol: sym,
+              rsiStart: null,
+              rsiEnd: null,
+              rsiDiff: null,
+              signal: 'ERROR'
+            });
+          }
+        }
+        renderAllSymbolsTable(allSymbolsInitialData); // Render the table after all data is loaded
+      } catch (error) {
+        console.error('Failed to load symbols or initial data:', error);
+        symbolSelect.innerHTML = `<option disabled selected>Error loading symbols</option>`; // Display error in dropdown
+      }
     };
-  };
 
-  loadSymbols();
-</script>
+    // Event listener for when a symbol is selected from the dropdown
+    document.getElementById('symbolSelect').onchange = (event) => {
+      const selectedSymbol = event.target.value;
+      // Update live display to show loading state
+      document.getElementById('signal').textContent = 'Loading live data...';
+      document.getElementById('currentSymbolInfo').textContent = '';
+      fetchInitialKlines(selectedSymbol); // Fetch initial klines for the selected symbol
+      connectWebSocket(selectedSymbol); // Connect WebSocket for live updates for the selected symbol
+    };
 
+    // Initial load of symbols and data for the table when the page loads
+    loadSymbolsAndInitialData();
+  </script>
 </body>
 </html>
