@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>RSI Pump/Dump Signal - Binance Futures</title>
+  <title>RSI Pump/Dump Signal – Binance USDT Futures</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -12,27 +12,37 @@
       text-align: center;
       padding: 20px;
     }
-    h1 {
+    h1, h2, select {
       color: #fff;
     }
     #signal {
       font-size: 2em;
       margin-top: 20px;
     }
+    #debug {
+      margin-top: 10px;
+      color: #ccc;
+    }
   </style>
 </head>
 <body>
 
 <h1>Binance RSI Pump/Dump Signal</h1>
-<h2>15m Timeframe – BTC/USDT Perpetual Futures</h2>
-<div id="signal">Connecting...</div>
+<h2>15m Timeframe – Select USDT Perpetual Pair</h2>
+
+<select id="symbolSelect">
+  <option disabled selected>Loading symbols...</option>
+</select>
+
+<div id="signal">Waiting for selection...</div>
+<div id="debug"></div>
 
 <script>
-  const symbol = 'btcusdt';
   const interval = '15m';
   const limit = 100;
   const rsiPeriod = 14;
   let closes = [];
+  let ws;
 
   const getRecentRSIDiff = (rsi, lookback = 14) => {
     if (rsi.length < lookback) return null;
@@ -80,10 +90,8 @@
 
     if (direction === 'pump' && pumpAbove30) return 'MAX ZONE PUMP';
     if (direction === 'dump' && dumpAbove30) return 'MAX ZONE DUMP';
-
     if (pumpInRange_21_26 && direction === 'pump') return 'BALANCE ZONE PUMP';
     if (dumpInRange_21_26 && direction === 'dump') return 'BALANCE ZONE DUMP';
-
     if (pumpInRange_1_10 && direction === 'pump') return 'LOWEST ZONE PUMP';
     if (dumpInRange_1_10 && direction === 'dump') return 'LOWEST ZONE DUMP';
 
@@ -103,52 +111,45 @@
 
     let avgGain = gains / period;
     let avgLoss = losses / period;
-
     rsi[period] = 100 - (100 / (1 + avgGain / avgLoss));
 
     for (let i = period + 1; i < data.length; i++) {
       const change = data[i] - data[i - 1];
       const gain = Math.max(change, 0);
       const loss = Math.max(-change, 0);
-
       avgGain = (avgGain * (period - 1) + gain) / period;
       avgLoss = (avgLoss * (period - 1) + loss) / period;
-
       rsi[i] = 100 - (100 / (1 + avgGain / avgLoss));
     }
 
     return rsi;
   };
 
-  const updateSignalDisplay = (signal) => {
+  const updateSignalDisplay = (signal, rsi14) => {
     const el = document.getElementById('signal');
     el.textContent = signal;
     el.style.color = signal.includes('PUMP') ? '#0f0' :
                      signal.includes('DUMP') ? '#f00' :
                      '#fff';
-  };
 
-  const fetchInitialData = async () => {
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    closes = data.map(k => parseFloat(k[4]));
-    runSignal();
+    const debugEl = document.getElementById('debug');
+    debugEl.innerText = `RSI Start: ${rsi14[0]?.toFixed(2)}, End: ${rsi14.at(-1)?.toFixed(2)}, Diff: ${(rsi14.at(-1) - rsi14[0]).toFixed(2)}`;
   };
 
   const runSignal = () => {
     const rsi = computeRSI(closes, rsiPeriod);
-    const rsi14 = rsi.slice(-30); // recent data
+    const rsi14 = rsi.slice(-30);
     const signal = getSignal({ rsi14 });
-    updateSignalDisplay(signal);
+    updateSignalDisplay(signal, rsi14);
   };
 
-  const connectWebSocket = () => {
-    const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol}@kline_${interval}`);
+  const connectWebSocket = (symbol) => {
+    if (ws) ws.close();
+    ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${interval}`);
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       const k = msg.k;
-      if (k.x) {  // candle closed
+      if (k.x) {
         const close = parseFloat(k.c);
         closes.push(close);
         if (closes.length > limit) closes.shift();
@@ -157,7 +158,42 @@
     };
   };
 
-  fetchInitialData().then(connectWebSocket);
+  const fetchInitialData = async (symbol) => {
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    closes = data.map(k => parseFloat(k[4]));
+    runSignal();
+    connectWebSocket(symbol);
+  };
+
+  const loadSymbols = async () => {
+    const url = `https://fapi.binance.com/fapi/v1/exchangeInfo`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const usdtPairs = data.symbols
+      .filter(s => s.quoteAsset === 'USDT' && s.contractType === 'PERPETUAL' && s.status === 'TRADING')
+      .map(s => s.symbol);
+
+    const select = document.getElementById('symbolSelect');
+    select.innerHTML = `<option disabled selected>Select a symbol</option>`;
+    usdtPairs.forEach(sym => {
+      const opt = document.createElement('option');
+      opt.value = sym;
+      opt.textContent = sym;
+      select.appendChild(opt);
+    });
+
+    select.onchange = () => {
+      const selected = select.value;
+      document.getElementById('signal').textContent = 'Loading...';
+      document.getElementById('debug').textContent = '';
+      fetchInitialData(selected);
+    };
+  };
+
+  loadSymbols();
 </script>
 
 </body>
