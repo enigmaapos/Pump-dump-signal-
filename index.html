@@ -104,6 +104,9 @@
     <h2 class="text-3xl mt-8 mb-6 text-white text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500">
       All USDT Perpetual Pairs (Live Overview)
     </h2>
+    <p class="text-sm text-red-400 mb-4 text-center max-w-2xl">
+      <strong class="font-bold">Warning:</strong> Tracking all symbols live can be resource-intensive and may lead to performance issues or Binance API rate limits.
+    </p>
     <!-- Table to display live data for tracked symbols, with sortable headers -->
     <table id="allSymbolsTable">
       <thead>
@@ -117,7 +120,7 @@
       </thead>
       <tbody id="allSymbolsTableBody">
         <!-- Rows will be dynamically inserted here by JavaScript -->
-        <tr><td colspan="5" class="text-center text-gray-500 py-4">Loading live data for top pairs...</td></tr>
+        <tr><td colspan="5" class="text-center text-gray-500 py-4">Loading all available pairs... This may take a moment.</td></tr>
       </tbody>
     </table>
   </div>
@@ -127,7 +130,7 @@
     const interval = '15m'; // Timeframe for klines
     const limit = 100; // Number of historical klines to fetch for RSI calculation
     const rsiPeriod = 14; // Period for RSI calculation
-    const MAX_TRACKED_SYMBOLS_FOR_TABLE = 20; // Limit for parallel WebSocket streams for the table
+    // const MAX_TRACKED_SYMBOLS_FOR_TABLE = 20; // Removed limit to track all symbols
 
     let closes = []; // Stores close prices for the currently selected symbol (for live updates in the top section)
     let singleSymbolWebSocket; // WebSocket object for the currently selected symbol (from dropdown)
@@ -527,11 +530,11 @@
       liveTableWebSockets.forEach(ws => ws.close()); // Close existing WS connections
       liveTableWebSockets.clear();
 
-      // Track only a limited number of symbols for performance and API limits
-      const trackedSymbols = usdtPairs.slice(0, MAX_TRACKED_SYMBOLS_FOR_TABLE);
+      // IMPORTANT CHANGE: Track ALL symbols instead of slicing
+      const trackedSymbols = usdtPairs; // Now tracking all symbols
 
       // Display loading message for the table initially
-      document.getElementById('allSymbolsTableBody').innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-4">Loading live data for top pairs...</td></tr>';
+      document.getElementById('allSymbolsTableBody').innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-4">Loading all available pairs... This may take a moment.</td></tr>';
 
       for (const symbol of trackedSymbols) {
         symbolClosesMap.set(symbol, []); // Initialize closes array for each symbol
