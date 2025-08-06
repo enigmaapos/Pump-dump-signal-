@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RSI Pump/Dump Signal - Binance Futures</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #0f0;
+      text-align: center;
+      padding: 20px;
+    }
+    h1 {
+      color: #fff;
+    }
+    #signal {
+      font-size: 2em;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Binance RSI Pump/Dump Signal</h1>
+<h2>15m Timeframe – BTC/USDT Perpetual Futures</h2>
+<div id="signal">Connecting...</div>
+
+<script>
+  const symbol = 'btcusdt';
+  const interval = '15m';
+  const limit = 100;
+  const rsiPeriod = 14;
+  let closes = [];
+
+  const getRecentRSIDiff = (rsi, lookback = 14) => {
+    if (rsi.length < lookback) return null;
+    const recentRSI = rsi.slice(-lookback);
+    let recentHigh = -Infinity;
+    let recentLow = Infinity;
+
+    for (const value of recentRSI) {
+      if (!isNaN(value)) {
+        if (value > recentHigh) recentHigh = value;
+        if (value < recentLow) recentLow = value;
+      }
+    }
+
+    const pumpStrength = recentHigh - recentLow;
+    const dumpStrength = Math.abs(recentLow - recentHigh);
+    const startRSI = recentRSI[0];
+    const endRSI = recentRSI[recentRSI.length - 1];
+    const direction = endRSI > startRSI ? 'pump' : endRSI < startRSI ? 'dump' : 'neutral';
+    const strength = Math.abs(endRSI - startRSI);
+
+    return { recentHigh, recentLow, pumpStrength, dumpStrength, direction, strength };
+  };
+
+  const getSignal = (s) => {
+    const pumpDump = s.rsi14 ? getRecentRSIDiff(s.rsi14, 14) : null;
+    if (!pumpDump) return 'NO DATA';
+
+    const direction = pumpDump.direction;
+    const strength = pumpDump.strength;
+    const pump = pumpDump.pumpStrength;
+    const dump = pumpDump.dumpStrength;
+
+    const inRange = (val, min, max) => val !== undefined && val >= min && val <= max;
+    const isAbove30 = (val) => val !== undefined && val >= 30;
+
+    const pumpAbove30 = isAbove30(pump);
+    const dumpAbove30 = isAbove30(dump);
+
+    const pumpInRange_21_26 = inRange(pump, 21, 26);
+    const dumpInRange_21_26 = inRange(dump, 21, 26);
+
+    const pumpInRange_1_10 = inRange(pump, 1, 10);
+    const dumpInRange_1_10 = inRange(dump, 1, 10);
+
+    if (direction === 'pump' && pumpAbove30) return 'MAX ZONE PUMP';
+    if (direction === 'dump' && dumpAbove30) return 'MAX ZONE DUMP';
+
+    if (pumpInRange_21_26 && direction === 'pump') return 'BALANCE ZONE PUMP';
+    if (dumpInRange_21_26 && direction === 'dump') return 'BALANCE ZONE DUMP';
+
+    if (pumpInRange_1_10 && direction === 'pump') return 'LOWEST ZONE PUMP';
+    if (dumpInRange_1_10 && direction === 'dump') return 'LOWEST ZONE DUMP';
+
+    return 'NO STRONG SIGNAL';
+  };
+
+  const computeRSI = (data, period = 14) => {
+    const rsi = [];
+    let gains = 0;
+    let losses = 0;
+
+    for (let i = 1; i < period + 1; i++) {
+      const change = data[i] - data[i - 1];
+      if (change > 0) gains += change;
+      else losses -= change;
+    }
+
+    let avgGain = gains / period;
+    let avgLoss = losses / period;
+
+    rsi[period] = 100 - (100 / (1 + avgGain / avgLoss));
+
+    for (let i = period + 1; i < data.length; i++) {
+      const change = data[i] - data[i - 1];
+      const gain = Math.max(change, 0);
+      const loss = Math.max(-change, 0);
+
+      avgGain = (avgGain * (period - 1) + gain) / period;
+      avgLoss = (avgLoss * (period - 1) + loss) / period;
+
+      rsi[i] = 100 - (100 / (1 + avgGain / avgLoss));
+    }
+
+    return rsi;
+  };
+
+  const updateSignalDisplay = (signal) => {
+    const el = document.getElementById('signal');
+    el.textContent = signal;
+    el.style.color = signal.includes('PUMP') ? '#0f0' :
+                     signal.includes('DUMP') ? '#f00' :
+                     '#fff';
+  };
+
+  const fetchInitialData = async () => {
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    closes = data.map(k => parseFloat(k[4]));
+    runSignal();
+  };
+
+  const runSignal = () => {
+    const rsi = computeRSI(closes, rsiPeriod);
+    const rsi14 = rsi.slice(-30); // recent data
+    const signal = getSignal({ rsi14 });
+    updateSignalDisplay(signal);
+  };
+
+  const connectWebSocket = () => {
+    const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol}@kline_${interval}`);
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      const k = msg.k;
+      if (k.x) {  // candle closed
+        const close = parseFloat(k.c);
+        closes.push(close);
+        if (closes.length > limit) closes.shift();
+        runSignal();
+      }
+    };
+  };
+
+  fetchInitialData().then(connectWebSocket);
+</script>
+
+</body>
+</html>
