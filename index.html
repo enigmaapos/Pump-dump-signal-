@@ -104,8 +104,8 @@
     <h2 class="text-3xl mt-8 mb-6 text-white text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500">
       All USDT Perpetual Pairs (Live Overview)
     </h2>
-    <p class="text-sm text-red-400 mb-4 text-center max-w-2xl">
-      <strong class="font-bold">Warning:</strong> Tracking all symbols live can be resource-intensive and may lead to performance issues or Binance API rate limits.
+    <p class="text-sm text-yellow-400 mb-4 text-center max-w-2xl">
+      This table updates every 15 seconds. Data is fetched in batches to comply with API rate limits.
     </p>
     <!-- Table to display live data for tracked symbols, with sortable headers -->
     <table id="allSymbolsTable">
@@ -130,21 +130,24 @@
     const interval = '15m'; // Timeframe for klines
     const limit = 100; // Number of historical klines to fetch for RSI calculation
     const rsiPeriod = 14; // Period for RSI calculation
-    // const MAX_TRACKED_SYMBOLS_FOR_TABLE = 20; // Removed limit to track all symbols
 
-    let closes = []; // Stores close prices for the currently selected symbol (for live updates in the top section)
-    let singleSymbolWebSocket; // WebSocket object for the currently selected symbol (from dropdown)
-
-    // Data structures for the live table overview
-    const symbolClosesMap = new Map(); // Map<symbol, number[]> stores historical closes for each tracked symbol
+    // Global variables for all symbols and table data
+    let allUsdtPairs = []; // Stores all available USDT perpetual pairs
     const liveTableDataMap = new Map(); // Map<symbol, object> stores the latest RSI signal data for each tracked symbol
-    const liveTableWebSockets = new Map(); // Map<symbol, WebSocket> stores WebSocket instances for live table updates
 
-    let currentSortColumn = 'symbol'; // Default sorting column for the table
-    let currentSortDirection = 'asc'; // Default sorting direction for the table
+    // Table sorting state
+    let currentSortColumn = 'symbol';
+    let currentSortDirection = 'asc';
     let tableUpdateAnimationFrameId = null; // Used to debounce table rendering
 
-    // Reconnection variables for single symbol WebSocket
+    // Batching and update interval for the table
+    const UPDATE_INTERVAL_MS = 15000; // Refresh table data every 15 seconds
+    const SYMBOLS_PER_BATCH = 10; // Number of symbols to fetch concurrently in one batch
+    const BATCH_PROCESSING_DELAY_MS = 500; // Delay between processing each batch
+
+    // Single symbol WebSocket (for dropdown)
+    let closes = []; // Stores close prices for the currently selected symbol (for live updates in the top section)
+    let singleSymbolWebSocket;
     let reconnectAttempts = 0;
     const MAX_RECONNECT_ATTEMPTS = 10;
     const BASE_RECONNECT_DELAY_MS = 1000; // 1 second
@@ -519,131 +522,76 @@
     });
 
     /**
-     * Initializes parallel WebSocket streams for a limited number of symbols
-     * to populate the live overview table.
-     * @param {string[]} usdtPairs - An array of all available USDT perpetual symbols.
+     * Fetches klines for a single symbol. Used by batch fetching.
+     * @param {string} symbol - The trading pair symbol.
+     * @returns {Promise<object|null>} Processed symbol data or null on error.
      */
-    const initializeLiveTableTracking = async (usdtPairs) => {
-      // Clear previous live table data and WebSockets if any
-      symbolClosesMap.clear();
-      liveTableDataMap.clear();
-      liveTableWebSockets.forEach(ws => ws.close()); // Close existing WS connections
-      liveTableWebSockets.clear();
-
-      // IMPORTANT CHANGE: Track ALL symbols instead of slicing
-      const trackedSymbols = usdtPairs; // Now tracking all symbols
-
-      // Display loading message for the table initially
-      document.getElementById('allSymbolsTableBody').innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-4">Loading all available pairs... This may take a moment.</td></tr>';
-
-      for (const symbol of trackedSymbols) {
-        symbolClosesMap.set(symbol, []); // Initialize closes array for each symbol
-
-        // Fetch initial klines for each tracked symbol
-        const klinesUrl = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
+    const fetchKlinesAndProcessRSI = async (symbol) => {
+        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
         try {
-          const res = await fetch(klinesUrl);
-          if (!res.ok) {
-            console.warn(`Could not fetch initial klines for ${symbol}: HTTP status ${res.status}.`);
-            liveTableDataMap.set(symbol, {
-              symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'FETCH ERROR'
-            });
-            scheduleTableRender(); // Schedule render even on error to update table
-            continue; // Skip to the next symbol if initial fetch fails
-          }
-          const data = await res.json();
-          const initialCloses = data.map(k => parseFloat(k[4]));
-          symbolClosesMap.set(symbol, initialCloses);
+            const res = await fetch(url);
+            if (!res.ok) {
+                console.warn(`Could not fetch klines for ${symbol}: HTTP status ${res.status}.`);
+                return { symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'FETCH ERROR' };
+            }
+            const data = await res.json();
+            const symbolCloses = data.map(k => parseFloat(k[4]));
 
-          // Compute initial RSI and signal for the table
-          if (initialCloses.length >= rsiPeriod + 1) {
-            const rsi = computeRSI(initialCloses, rsiPeriod);
-            const rsiSlice = rsi.slice(-30);
-            const signal = getSignal({ rsi14: rsiSlice });
-            liveTableDataMap.set(symbol, {
-              symbol,
-              rsiStart: rsiSlice.length > 0 ? rsiSlice[0] : null,
-              rsiEnd: rsiSlice.length > 0 ? rsiSlice[rsiSlice.length - 1] : null,
-              rsiDiff: (rsiSlice.length > 0 && rsiSlice[0] !== null && rsiSlice[rsiSlice.length - 1] !== null) ? (rsiSlice[rsiSlice.length - 1] - rsiSlice[0]) : null,
-              signal,
-            });
-          } else {
-            liveTableDataMap.set(symbol, {
-              symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'NOT ENOUGH DATA'
-            });
-          }
-        } catch (error) {
-          console.error(`Error fetching initial klines for ${symbol}:`, error);
-          liveTableDataMap.set(symbol, {
-            symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'ERROR'
-          });
-        }
-        scheduleTableRender(); // Schedule initial table render after each symbol's data is processed
-
-        // Establish WebSocket connection for live updates
-        const streamName = `${symbol.toLowerCase()}@kline_${interval}`;
-        const ws = new WebSocket(`wss://fstream.binance.com/ws/${streamName}`);
-        liveTableWebSockets.set(symbol, ws); // Store WebSocket instance
-
-        ws.onmessage = (event) => {
-          const msg = JSON.parse(event.data);
-          const k = msg.k;
-
-          if (k.x) { // Closed candle
-            const close = parseFloat(k.c);
-            const closesForSymbol = symbolClosesMap.get(symbol);
-            if (closesForSymbol) {
-              closesForSymbol.push(close);
-              if (closesForSymbol.length > limit) closesForSymbol.shift();
-
-              if (closesForSymbol.length >= rsiPeriod + 1) {
-                const rsi = computeRSI(closesForSymbol);
+            if (symbolCloses.length >= rsiPeriod + 1) {
+                const rsi = computeRSI(symbolCloses, rsiPeriod);
                 const rsiSlice = rsi.slice(-30);
                 const signal = getSignal({ rsi14: rsiSlice });
 
-                liveTableDataMap.set(symbol, {
-                  symbol,
-                  rsiStart: rsiSlice.length > 0 ? rsiSlice[0] : null,
-                  rsiEnd: rsiSlice.length > 0 ? rsiSlice[rsiSlice.length - 1] : null,
-                  rsiDiff: (rsiSlice.length > 0 && rsiSlice[0] !== null && rsiSlice[rsiSlice.length - 1] !== null) ? (rsiSlice[rsiSlice.length - 1] - rsiSlice[0]) : null,
-                  signal,
-                });
-              } else {
-                 liveTableDataMap.set(symbol, {
-                  symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'NOT ENOUGH DATA'
-                });
-              }
+                return {
+                    symbol,
+                    rsiStart: rsiSlice.length > 0 ? rsiSlice[0] : null,
+                    rsiEnd: rsiSlice.length > 0 ? rsiSlice[rsiSlice.length - 1] : null,
+                    rsiDiff: (rsiSlice.length > 0 && rsiSlice[0] !== null && rsiSlice[rsiSlice.length - 1] !== null) ? (rsiSlice[rsiSlice.length - 1] - rsiSlice[0]) : null,
+                    signal,
+                };
+            } else {
+                return { symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'NOT ENOUGH DATA' };
             }
-            scheduleTableRender(); // Schedule a table re-render
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error(`Live table WebSocket error for ${symbol}:`, error);
-          liveTableDataMap.set(symbol, {
-            symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'WS ERROR'
-          });
-          scheduleTableRender();
-        };
-
-        ws.onclose = (event) => {
-          console.log(`Live table WebSocket closed for ${symbol}:`, event.code, event.reason);
-          // Simple reconnection attempt for live table symbols (can be improved with backoff if needed)
-          if (!event.wasClean) {
-            console.log(`Attempting to re-establish live table WebSocket for ${symbol}...`);
-            // To prevent infinite loops, a simple delay is used here. For production, consider full exponential backoff.
-            setTimeout(() => {
-                const newWs = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${interval}`);
-                liveTableWebSockets.set(symbol, newWs); // Update the map with the new WS instance
-                // Re-attach onmessage, onerror, onclose handlers here for the newWs
-                newWs.onmessage = ws.onmessage;
-                newWs.onerror = ws.onerror;
-                newWs.onclose = ws.onclose;
-            }, 5000); // Try reconnecting after 5 seconds
-          }
-        };
-      }
+        } catch (error) {
+            console.error(`Error fetching klines or processing RSI for ${symbol}:`, error);
+            return { symbol, rsiStart: null, rsiEnd: null, rsiDiff: null, signal: 'ERROR' };
+        }
     };
+
+    /**
+     * Refreshes all symbols' data for the table using batch fetching.
+     * This is called periodically by setInterval.
+     */
+    const refreshAllSymbolsTableData = async () => {
+        if (allUsdtPairs.length === 0) {
+            console.warn("No USDT pairs loaded yet for table refresh.");
+            return;
+        }
+
+        document.getElementById('allSymbolsTableBody').innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-4">Updating all pairs...</td></tr>';
+
+        for (let i = 0; i < allUsdtPairs.length; i += SYMBOLS_PER_BATCH) {
+            const batchSymbols = allUsdtPairs.slice(i, i + SYMBOLS_PER_BATCH);
+            const batchPromises = batchSymbols.map(symbol => fetchKlinesAndProcessRSI(symbol));
+
+            const results = await Promise.all(batchPromises); // Fetch batch concurrently
+
+            results.forEach(item => {
+                if (item) { // Ensure item is not null from fetchKlinesAndProcessRSI error
+                    liveTableDataMap.set(item.symbol, item);
+                }
+            });
+
+            scheduleTableRender(); // Render after each batch
+
+            // Introduce a delay between batches to respect rate limits
+            if (i + SYMBOLS_PER_BATCH < allUsdtPairs.length) {
+                await new Promise(resolve => setTimeout(resolve, BATCH_PROCESSING_DELAY_MS));
+            }
+        }
+        console.log("Finished refreshing all symbols table data.");
+    };
+
 
     /**
      * Loads all USDT perpetual symbols from Binance, populates the dropdown,
@@ -662,21 +610,24 @@
         const data = await res.json();
 
         // Filter for USDT perpetual trading pairs that are currently active
-        const usdtPairs = data.symbols
+        allUsdtPairs = data.symbols
           .filter(s => s.quoteAsset === 'USDT' && s.contractType === 'PERPETUAL' && s.status === 'TRADING')
           .map(s => s.symbol);
 
         // Populate the symbol selection dropdown
         symbolSelect.innerHTML = `<option disabled selected>Select a symbol</option>`;
-        usdtPairs.forEach(sym => {
+        allUsdtPairs.forEach(sym => {
           const opt = document.createElement('option');
           opt.value = sym;
           opt.textContent = sym;
           symbolSelect.appendChild(opt);
         });
 
-        // Initialize live table tracking for a subset of symbols
-        await initializeLiveTableTracking(usdtPairs);
+        // Initial refresh of the table data
+        await refreshAllSymbolsTableData();
+
+        // Start periodic refresh for the table data
+        setInterval(refreshAllSymbolsTableData, UPDATE_INTERVAL_MS);
 
       } catch (error) {
         console.error('Failed to load symbols or initial data:', error);
